@@ -300,13 +300,13 @@ pAnyScript = ScriptBundle
       index <- Atto.char '#' *> parseTxIx
       return $ TxInAnyEra txId index IsPlutusFee
 
-    pRedeemer :: Parser Redeemer
-    pRedeemer = Redeemer <$> Opt.strOption
-        (  Opt.long "redeemer-file"
-        <> Opt.metavar "FILE"
-        <> Opt.help "Filepath of the script redeemer."
-        <> Opt.completer (Opt.bashCompleter "file")
-        )
+pRedeemer :: Parser Redeemer
+pRedeemer = Redeemer <$> Opt.strOption
+    (  Opt.long "redeemer-file"
+    <> Opt.metavar "FILE"
+    <> Opt.help "Filepath of the script redeemer."
+    <> Opt.completer (Opt.bashCompleter "file")
+    )
 
 pStakeAddress :: Parser StakeAddressCmd
 pStakeAddress =
@@ -1646,13 +1646,17 @@ pCardanoEra = asum
   , pure (AnyCardanoEra ShelleyEra)
   ]
 
-pTxIn :: Parser TxInAnyEra
-pTxIn =
-  Opt.option (readerFromAttoParser parseTxInAny)
-    (  Opt.long "tx-in"
-    <> Opt.metavar "TX-IN"
-    <> Opt.help "The input transaction as TxId#TxIx where TxId is the transaction hash and TxIx is the index."
-    )
+pTxIn :: Parser (TxInAnyEra, Maybe ZippedPlutusScriptType)
+pTxIn = do
+  (,) <$> Opt.option (readerFromAttoParser parseTxInAny)
+             (  Opt.long "tx-in"
+             <> Opt.metavar "TX-IN"
+             <> Opt.help "The input transaction as TxId#TxIx where TxId is the transaction hash and TxIx is the index."
+             )
+      <*> optional (ZippedSpending <$> pScriptFile
+                                   <*> some pRedeemer
+                                   <*> optional parseDatum)
+
 
 parseTxInAny :: Atto.Parser TxInAnyEra
 parseTxInAny = do

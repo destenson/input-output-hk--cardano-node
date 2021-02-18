@@ -11,6 +11,7 @@ module Cardano.CLI.Types
   , ScriptBundle(..)
   , NonNativeScriptFile(..)
   , PlutusScriptType(..)
+  , ZippedPlutusScriptType(..)
   , OutputFormat (..)
   , PlutusTag (..)
   , PlutusScriptRequirements(..)
@@ -137,6 +138,19 @@ data PlutusScriptRequirements
       , plutusScriptRedeemers :: [Redeemer]
       , plutusScriptDatum :: Maybe Datum
       } deriving Show
+
+-- | The different types of Plutus scripts
+--and what they do.
+data ZippedPlutusScriptType
+  = ZippedSpending ScriptFile [Redeemer] (Maybe Datum)
+    -- ^ Validates spending a script-locked UTxO
+  | ZippedMinting ScriptFile [Redeemer] (Maybe Datum)
+    -- ^ Validates minting new tokens
+  | ZippedRewarding ScriptFile [Redeemer] (Maybe Datum)
+    -- ^ Validates certificate transactions
+  | ZippedCertifying ScriptFile [Redeemer] (Maybe Datum)
+    -- ^ Validates withdrawl from a reward account
+  deriving Show
 
 -- | The different types of Plutus scripts
 --and what they do.

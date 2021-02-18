@@ -161,7 +161,7 @@ renderKeyCmd cmd =
 data TransactionCmd
   = TxBuildRaw
       AnyCardanoEra
-      [TxInAnyEra]
+      [(TxInAnyEra, Maybe ZippedPlutusScriptType)]
       [TxOutAnyEra]
       (Maybe Value)
       -- ^ Multi-Asset value

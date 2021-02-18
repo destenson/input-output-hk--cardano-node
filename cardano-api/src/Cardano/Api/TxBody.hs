@@ -302,7 +302,7 @@ deriving instance Show (TxInTypeInEra era)
 --   4. Validate reward withdrawals from script addresses.
 
 data PlutusScriptPurpose era where
-  Spending   :: TxIn era     -> PlutusScriptPurpose era
+  Spending   :: TxIn era     -> Maybe ScriptDatum -> PlutusScriptPurpose era
   Minting    :: PolicyId     -> PlutusScriptPurpose era
   Certifying :: Certificate  -> PlutusScriptPurpose era
   Rewarding  :: StakeAddress -> PlutusScriptPurpose era
@@ -336,10 +336,10 @@ generateRewardingRedeemer _ _ _ = Nothing
 
 generateSpendingRedeemer
   :: ScriptLanguageInEra lang era
-  -> (PlutusScriptPurpose era, Maybe ScriptDatum)
+  -> PlutusScriptPurpose era
   -> [TxIn era]
   -> Maybe (RedeemerPointer, Maybe ScriptDatum)
-generateSpendingRedeemer PlutusScriptV1InAlonzo (Spending txin, mDatum) txins = do
+generateSpendingRedeemer PlutusScriptV1InAlonzo (Spending txin mDatum) txins = do
   r <- SpendingRedeemer . fromIntegral <$> elemIndex txin txins
   Just (r, mDatum)
 generateSpendingRedeemer _ _ _ = Nothing
@@ -386,10 +386,10 @@ makeTxWitnessPPDataHash _ TxWitnessPPDataNone _ _ _ _ = Nothing
 makeTxWitnessPPDataHash sLangInEra (TxWitnessPPData _pparams scriptDatTuples)
                         txins txcerts txouts txWithdrawals =
   let _redeemers = [ redeemer | sDtups <- scriptDatTuples
-                   , let redeemers = [ generateCertificateRedeemer sLangInEra sDtups txcerts
-                                     , generateSpendingRedeemer sLangInEra sDtups txins
-                                     , generateMintingRedeemer sLangInEra sDtups txouts
-                                     , generateRewardingRedeemer sLangInEra sDtups txWithdrawals
+                   , let redeemers = [ --generateCertificateRedeemer sLangInEra sDtups txcerts
+                                       generateSpendingRedeemer sLangInEra sDtups txins
+                                  --   , generateMintingRedeemer sLangInEra sDtups txouts
+                                  --   , generateRewardingRedeemer sLangInEra sDtups txWithdrawals
                                      ]
                    , redeemer <- redeemers
                    ]
@@ -1012,7 +1012,7 @@ executionUnitsSupportedInEra AlonzoEra  = Just ExecutionUnitsSupportedInAlonzoEr
 data TxWitnessPPData era where
     TxWitnessPPDataNone :: TxWitnessPPData era
     TxWitnessPPData     :: ProtocolParameters era --TODO: This will need an era parameter to account for Alonzo
-                        -> [(PlutusScriptPurpose era, Maybe ScriptDatum)]
+                        -> [PlutusScriptPurpose era]
                         -> TxWitnessPPData era
 
 data WitnessPPDataSupportedInEra era where
@@ -1032,7 +1032,7 @@ witnessPPDataSupportedInEra AlonzoEra  = Just WitnessPPDataSupportedInAlonzoEra
 
 data TxBodyContent era =
      TxBodyContent {
-       txIns            :: [TxIn era],
+       txIns            :: [(TxIn era, Maybe (PlutusScriptPurpose era))],
        txOuts           :: [TxOut era],
        txFee            :: TxFee era,
        txValidityRange  :: (TxValidityLowerBound era,
@@ -1271,7 +1271,8 @@ makeTransactionBody =
 makeByronTransactionBody :: TxBodyContent ByronEra
                          -> Either (TxBodyError ByronEra) (TxBody ByronEra)
 makeByronTransactionBody TxBodyContent { txIns, txOuts } = do
-    ins'  <- NonEmpty.nonEmpty txIns      ?! TxBodyEmptyTxIns
+    let onlyIns = map fst txIns
+    ins'  <- NonEmpty.nonEmpty onlyIns   ?! TxBodyEmptyTxIns
     let ins'' = NonEmpty.map toByronTxIn ins'
 
     outs'  <- NonEmpty.nonEmpty txOuts    ?! TxBodyEmptyTxOuts
@@ -1327,7 +1328,7 @@ makeShelleyTransactionBody era@ShelleyBasedEraShelley
     return $
       ShelleyTxBody era
         (Shelley.TxBody
-          (Set.fromList (map toShelleyTxIn  txIns))
+          (Set.fromList (map toShelleyTxIn $ map fst txIns))
           (Seq.fromList (map toShelleyTxOut txOuts))
           (case txCertificates of
              TxCertificatesNone  -> Seq.empty
@@ -1384,7 +1385,7 @@ makeShelleyTransactionBody era@ShelleyBasedEraAllegra
     return $
       ShelleyTxBody era
         (Allegra.TxBody
-          (Set.fromList (map toShelleyTxIn  txIns))
+          (Set.fromList (map toShelleyTxIn $ map fst txIns))
           (Seq.fromList (map toShelleyTxOut txOuts))
           (case txCertificates of
              TxCertificatesNone  -> Seq.empty
@@ -1461,7 +1462,7 @@ makeShelleyTransactionBody era@ShelleyBasedEraMary
     return $
       ShelleyTxBody era
         (Allegra.TxBody
-          (Set.fromList (map toShelleyTxIn  txIns))
+          (Set.fromList (map toShelleyTxIn $ map fst txIns))
           (Seq.fromList (map toShelleyTxOut txOuts))
           (case txCertificates of
              TxCertificatesNone  -> Seq.empty
@@ -1535,7 +1536,7 @@ makeShelleyTransactionBody era@ShelleyBasedEraAlonzo
     let _txWitnessPPDataHash = makeTxWitnessPPDataHash
                                  PlutusScriptV1InAlonzo
                                  txWitnessPPData
-                                 txIns
+                                 (map fst txIns)
                                  txCertificates
                                  txOuts
                                  txWithdrawals
@@ -1552,7 +1553,7 @@ makeShelleyTransactionBody era@ShelleyBasedEraAlonzo
     return $
       ShelleyTxBody era
         (Allegra.TxBody
-          (Set.fromList (map toShelleyTxIn  txIns))
+          (Set.fromList (map toShelleyTxIn $ map fst txIns))
           (Seq.fromList (map toShelleyTxOut txOuts))
           (case txCertificates of
              TxCertificatesNone  -> Seq.empty
@@ -1638,7 +1639,7 @@ makeByronTransaction :: [TxIn ByronEra]
 makeByronTransaction txIns txOuts =
     makeTransactionBody $
       TxBodyContent {
-        txIns,
+        txIns = (map (\txin -> (txin, Nothing)) txIns),
         txOuts,
         txFee            = TxFeeImplicit TxFeesImplicitInByronEra,
         txValidityRange  = (TxValidityNoLowerBound,
@@ -1669,7 +1670,7 @@ makeShelleyTransaction txIns txOuts ttl fee
                        certs withdrawals mMetadata mUpdateProp =
     makeTransactionBody $
       TxBodyContent {
-        txIns,
+        txIns = (map (\txin -> (txin, Nothing)) txIns),
         txOuts,
         txFee            = TxFeeExplicit TxFeesExplicitInShelleyEra fee,
         txValidityRange  = (TxValidityNoLowerBound,

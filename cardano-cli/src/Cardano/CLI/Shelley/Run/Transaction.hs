@@ -230,7 +230,7 @@ runTransactionCmd cmd =
 
 runTxBuildRaw
   :: AnyCardanoEra
-  -> [TxInAnyEra]
+  -> [(TxInAnyEra, Maybe ZippedPlutusScriptType)]
   -> [TxOutAnyEra]
   -> Maybe SlotNo
   -- ^ Tx lower bound
@@ -255,14 +255,10 @@ runTxBuildRaw (AnyCardanoEra era) txins txouts mLowerBound
               metadataSchema scripts
               mParamsFile metadataFiles mUpdatePropFile
               (TxBodyFile fpath) = do
-
-    validatedPlutusFees <- validatePlutusFees era scripts
-
-    validatedTxIns <- validateTxIns era txins
-
+    valTxIns <- validateTxIns era txins
     txBodyContent <-
       TxBodyContent
-        <$> return (validatedTxIns ++ validatedPlutusFees)
+        <$> return valTxIns
         <*> validateTxOuts era txouts
         <*> validateTxFee  era mFee
         <*> ((,) <$> validateTxValidityLowerBound era mLowerBound
@@ -274,7 +270,7 @@ runTxBuildRaw (AnyCardanoEra era) txins txouts mLowerBound
         <*> validateTxUpdateProposal era mUpdatePropFile
         <*> validateTxMintValue      era mValue
         <*> validateTxExecutionUnits era scripts
-        <*> validateTxWitnessPPData era mParamsFile scripts
+        <*> validateTxWitnessPPData era mParamsFile valTxIns
 
     txBody <-
       firstExceptT (ShelleyTxCmdTxBodyError . SomeTxBodyError) . hoistEither $
@@ -313,33 +309,26 @@ txFeatureMismatch :: CardanoEra era
 txFeatureMismatch era feature =
     left (ShelleyTxCmdTxFeatureMismatch (anyCardanoEra era) feature)
 
-validatePlutusFees :: forall era.
-                      CardanoEra era
-                   -> [ScriptBundle]
-                   -> ExceptT ShelleyTxCmdError IO [TxIn era]
-validatePlutusFees era scripts = concat <$> mapM plutusFees scripts
- where
-  plutusFees :: ScriptBundle
-             -> ExceptT ShelleyTxCmdError IO [TxIn era]
-  plutusFees (ScriptBundle _ mReq) =
-    case mReq of
-      Just req -> validateTxIns era $ plutusScriptTxIns req
-      Nothing -> return []
-
 validateTxIns :: forall era.
                  CardanoEra era
-              -> [TxInAnyEra]
-              -> ExceptT ShelleyTxCmdError IO [TxIn era]
+              -> [(TxInAnyEra, Maybe ZippedPlutusScriptType)]
+              -> ExceptT ShelleyTxCmdError IO [(TxIn era, Maybe (PlutusScriptPurpose era))]
 validateTxIns era = mapM toTxIn
   where
-    toTxIn :: TxInAnyEra -> ExceptT ShelleyTxCmdError IO (TxIn era)
-    toTxIn (TxInAnyEra txId xId tag) =
+    toTxIn :: (TxInAnyEra, Maybe ZippedPlutusScriptType) -> ExceptT ShelleyTxCmdError IO (TxIn era, Maybe (PlutusScriptPurpose era))
+    toTxIn (TxInAnyEra txId xId tag, mPlutusScript) =
       case plutusFeesSupportedInEra era of
-        Left _plutusNotSupported -> return $ TxIn txId xId NotPlutusInput
+        Left _plutusNotSupported -> return (TxIn txId xId NotPlutusInput, Nothing)
         Right plutusInAlonzo ->
-          case tag of
-            IsPlutusFee -> return . TxIn txId xId $ PlutusInput plutusInAlonzo
-            IsNotPlutusFee -> return $ TxIn txId xId NotPlutusInput
+          case (tag, mPlutusScript) of
+            (IsPlutusFee, Nothing) -> return (TxIn txId xId $ PlutusInput plutusInAlonzo, Nothing)
+            (IsNotPlutusFee, Nothing) -> return (TxIn txId xId NotPlutusInput, Nothing)
+            (IsPlutusFee, Just _) -> panic "Does not make sense to lock a plutus fee"
+            (IsNotPlutusFee, Just (ZippedSpending _ _ mDatum)) -> let txIn = TxIn txId xId NotPlutusInput
+                                                    in return (txIn, Just (Api.Spending txIn $ toScriptDatum mDatum))
+    toScriptDatum :: Maybe Datum -> Maybe ScriptDatum
+    toScriptDatum Nothing = Nothing
+    toScriptDatum (Just _) = Just $ ScriptDatum ()
 
 validateTxOuts :: forall era.
                   CardanoEra era
@@ -523,68 +512,54 @@ validateTxExecutionUnits era scripts =
 
 validateTxWitnessPPData :: forall era. CardanoEra era
                         -> Maybe ProtocolParamsFile
-                        -> [ScriptBundle]
+                        -> [(TxIn era, Maybe (PlutusScriptPurpose era))]
                         -> ExceptT ShelleyTxCmdError IO (TxWitnessPPData era)
 validateTxWitnessPPData _ _ [] = return TxWitnessPPDataNone
-validateTxWitnessPPData era mPParams scripts =
-  case filter isPlutusScript scripts of
-    [] -> return TxWitnessPPDataNone
-    plutusScripts -> case witnessPPDataSupportedInEra era of
-                       Just _supported ->
-                           case mPParams of
-                             Nothing -> left ShelleyTxCmdPParamsNotSpecifiedPlutusScript
-                             Just pParamsFile ->
-                               case cardanoEraStyle era of
-                                 LegacyByronEra -> txFeatureMismatch era TxFeatureWitnessPPData
-                                 ShelleyBasedEra _ -> do
-                                   pparams <- readProtocolParameters pParamsFile
-                                   toTxWitnessPPData pparams plutusScripts
-                       Nothing -> return TxWitnessPPDataNone
+validateTxWitnessPPData era mPParams mSpendingScripts =
+  case witnessPPDataSupportedInEra era of
+    Just _supported ->
+        case mPParams of
+          Nothing -> left ShelleyTxCmdPParamsNotSpecifiedPlutusScript
+          Just pParamsFile ->
+            case cardanoEraStyle era of
+              LegacyByronEra -> txFeatureMismatch era TxFeatureWitnessPPData
+              ShelleyBasedEra _ -> do
+                pparams <- readProtocolParameters pParamsFile
+                toTxWitnessPPData pparams mSpendingScripts
+    Nothing -> return TxWitnessPPDataNone
  where
-   isPlutusScript :: ScriptBundle -> Bool
-   isPlutusScript (ScriptBundle _ (Just _)) = True
-   isPlutusScript _ = False
 
-   getPlutusScriptTypes :: [ScriptBundle] -> [PlutusScriptType]
-   getPlutusScriptTypes [] = []
-   getPlutusScriptTypes (ScriptBundle _ (Just req) : rest) = plutusScriptType req : getPlutusScriptTypes rest
-   getPlutusScriptTypes (ScriptBundle _ Nothing : rest) = getPlutusScriptTypes rest
-
-   toPlutusScriptPurpose :: PlutusScriptType
-                         -> ExceptT ShelleyTxCmdError IO (PlutusScriptPurpose era)
-   toPlutusScriptPurpose (Spending txin) = do
-     -- TODO: This can be pure
-     res <- validateTxIns era [txin]
-     case res of
-       [x] -> return $ Api.Spending x
-       _ -> panic "Impossible"
-   toPlutusScriptPurpose (Minting policyId) = return $ Api.Minting policyId
-   toPlutusScriptPurpose (Rewarding rewardAcct) = return $ Api.Rewarding rewardAcct
-   toPlutusScriptPurpose (Certifying certificate) = do
-    --TODO: This can be pure
-     res <- validateTxCertificates era [CertificateFile certificate]
-     case res of
-       TxCertificates _ [x] -> return $ Api.Certifying x
-       _ -> panic "impossible"
-
-   getScriptDatums :: [ScriptBundle] -> [Maybe ScriptDatum]
-   getScriptDatums [] = []
-   getScriptDatums (ScriptBundle _ (Just req) : rest) =
-     toScriptDatum (plutusScriptDatum req) : getScriptDatums rest
-   getScriptDatums (ScriptBundle _ Nothing : rest) =
-     getScriptDatums rest
-
-   toScriptDatum :: Maybe Datum -> Maybe ScriptDatum
-   toScriptDatum (Just (Datum _)) = Just (ScriptDatum ())
-   toScriptDatum Nothing = Nothing
+   --toPlutusScriptPurpose :: PlutusScriptType
+   --                      -> ExceptT ShelleyTxCmdError IO (PlutusScriptPurpose era)
+   --toPlutusScriptPurpose (Spending txin) = do
+   --  -- TODO: This can be pure
+   --  res <- validateTxIns era [txin]
+   --  case res of
+   --    [x] -> return $ Api.Spending x
+   --    _ -> panic "Impossible"
+   --toPlutusScriptPurpose (Minting policyId) = return $ Api.Minting policyId
+   --toPlutusScriptPurpose (Rewarding rewardAcct) = return $ Api.Rewarding rewardAcct
+   --toPlutusScriptPurpose (Certifying certificate) = do
+   -- --TODO: This can be pure
+   --  res <- validateTxCertificates era [CertificateFile certificate]
+   --  case res of
+   --    TxCertificates _ [x] -> return $ Api.Certifying x
+   --    _ -> panic "impossible"
 
    toTxWitnessPPData :: ProtocolParameters era
-                     -> [ScriptBundle]
+                     -> [(TxIn era, Maybe (PlutusScriptPurpose era))]
                      -> ExceptT ShelleyTxCmdError IO (TxWitnessPPData era)
-   toTxWitnessPPData pParams scripts' = do
-     sPurposes <- mapM toPlutusScriptPurpose (getPlutusScriptTypes scripts')
-     let sDatums = getScriptDatums scripts'
-     return $ TxWitnessPPData pParams $ zip sPurposes sDatums
+   toTxWitnessPPData pParams spendingScripts' = do
+     let sPurposesDatums = mapMaybe toSpendingScript spendingScripts'
+     return $ TxWitnessPPData pParams sPurposesDatums
+
+   toSpendingScript :: (TxIn era, Maybe (PlutusScriptPurpose era)) -> Maybe (PlutusScriptPurpose era)
+   toSpendingScript (_, Nothing) = Nothing
+   toSpendingScript (txIn, Just (Api.Spending _txin datum)) =
+     case datum of
+       Just _dat -> Just (Api.Spending txIn datum)
+       Nothing -> Just (Api.Spending txIn Nothing)
+   toSpendingScript _ = Nothing
 
 -- ----------------------------------------------------------------------------
 -- Transaction signing
